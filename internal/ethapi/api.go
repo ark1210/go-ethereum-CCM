@@ -50,7 +50,7 @@ import (
 	"github.com/tyler-smith/go-bip39"
 )
 
-// Customized function to propagate transactions to Kafka
+// KafkaProducer는 Kafka로 메시지를 전송하는 함수입니다.
 func KafkaProducer(topic string, message []byte) error {
 	producer, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "3.38.154.85:39092"})
 	if err != nil {
@@ -1700,12 +1700,39 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 		// Ensure only eip155 signed transactions are submitted if EIP155Required is set.
 		return common.Hash{}, errors.New("only replay-protected (EIP-155) transactions allowed over RPC")
 	}
-	if err := b.SendTx(ctx, tx); err != nil {
-		return common.Hash{}, err
-	}
-	// Print a log with full tx details for manual investigations and interventions
+
 	signer := types.MakeSigner(b.ChainConfig(), b.CurrentBlock().Number())
 	from, err := types.Sender(signer, tx)
+
+	// 트랜잭션 데이터를 JSON으로 인코딩하여 Kafka로 전송하는 부분
+	txData := map[string]interface{}{
+		"from": from.Hex(),
+		"to": func() string {
+			if tx.To() == nil {
+				return "0x0" // 컨트랙트 생성 트랜잭션을 가리키는 경우
+			}
+			return tx.To().Hex()
+		}(),
+		"value":    ensureEvenLengthHex(hexutil.EncodeUint64(tx.Value().Uint64())),
+		"gas":      ensureEvenLengthHex(hexutil.EncodeUint64(tx.Gas())),
+		"gasPrice": ensureEvenLengthHex(hexutil.EncodeUint64(tx.GasPrice().Uint64())),
+		"nonce":    ensureEvenLengthHex(hexutil.EncodeUint64(tx.Nonce())),
+		"data":     ensureEvenLengthHex(hexutil.Encode(tx.Data())),
+		"hash":     tx.Hash().Hex(),
+		"chainId":  ensureEvenLengthHex(hexutil.EncodeUint64(tx.ChainId().Uint64())),
+	}
+
+	txBytes, err := json.Marshal(txData)
+	if err != nil {
+		log.Error("Failed to marshal transaction data to JSON", "err", err)
+		return common.Hash{}, err
+	}
+
+	if err := KafkaProducer("my-topic", txBytes); err != nil {
+		return common.Hash{}, err
+	}
+
+	// Print a log with full tx details for manual investigations and interventions
 	if err != nil {
 		return common.Hash{}, err
 	}
@@ -1719,64 +1746,38 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 	return tx.Hash(), nil
 }
 
+// SendTransaction creates a transaction for the given argument, sign it and submit it to the
+// transaction pool.
 func (s *TransactionAPI) SendTransaction(ctx context.Context, args TransactionArgs) (common.Hash, error) {
-	// 트랜잭션 생성 및 기본값 설정
-	if args.Gas == nil || args.GasPrice == nil || args.Nonce == nil {
-		return common.Hash{}, errors.New("gas, gasPrice, and nonce are required")
+	//      helloWorld()
+	// Look up the wallet containing the requested signer
+	account := accounts.Account{Address: args.from()}
+
+	wallet, err := s.b.AccountManager().Find(account)
+	if err != nil {
+		return common.Hash{}, err
 	}
+
+	if args.Nonce == nil {
+		// Hold the addresse's mutex around signing to prevent concurrent assignment of
+		// the same nonce to multiple accounts.
+		s.nonceLock.LockAddr(args.from())
+		defer s.nonceLock.UnlockAddr(args.from())
+	}
+
+	// Set some sanity defaults and terminate on failure
 	if err := args.setDefaults(ctx, s.b); err != nil {
 		return common.Hash{}, err
 	}
+	// Assemble the transaction and sign with the wallet
 	tx := args.toTransaction()
 
-	// 트랜잭션 정보를 JSON으로 인코딩하여 Kafka로 전송
-	txData, err := json.Marshal(tx)
+	signed, err := wallet.SignTx(account, tx, s.b.ChainConfig().ChainID)
 	if err != nil {
-		log.Error("Failed to marshal transaction", "err", err)
 		return common.Hash{}, err
 	}
-
-	if err := KafkaProducer("my-topic", txData); err != nil {
-		return common.Hash{}, err
-	}
-
-	// Kafka로 전송된 트랜잭션에 대한 가상의 해시 반환
-	fakeHash := "0x" + hexutil.Encode(tx.Hash().Bytes())
-	return common.HexToHash(fakeHash), nil
+	return SubmitTransaction(ctx, s.b, signed)
 }
-
-// SendTransaction creates a transaction for the given argument, sign it and submit it to the
-// transaction pool.
-// func (s *TransactionAPI) SendTransaction(ctx context.Context, args TransactionArgs) (common.Hash, error) {
-// 	helloWorld()
-// 	// Look up the wallet containing the requested signer
-// 	account := accounts.Account{Address: args.from()}
-
-// 	wallet, err := s.b.AccountManager().Find(account)
-// 	if err != nil {
-// 		return common.Hash{}, err
-// 	}
-
-// 	if args.Nonce == nil {
-// 		// Hold the addresse's mutex around signing to prevent concurrent assignment of
-// 		// the same nonce to multiple accounts.
-// 		s.nonceLock.LockAddr(args.from())
-// 		defer s.nonceLock.UnlockAddr(args.from())
-// 	}
-
-// 	// Set some sanity defaults and terminate on failure
-// 	if err := args.setDefaults(ctx, s.b); err != nil {
-// 		return common.Hash{}, err
-// 	}
-// 	// Assemble the transaction and sign with the wallet
-// 	tx := args.toTransaction()
-
-// 	signed, err := wallet.SignTx(account, tx, s.b.ChainConfig().ChainID)
-// 	if err != nil {
-// 		return common.Hash{}, err
-// 	}
-// 	return SubmitTransaction(ctx, s.b, signed)
-// }
 
 // FillTransaction fills the defaults (nonce, gas, gasPrice or 1559 fields)
 // on a given unsigned transaction, and returns it to the caller for further
