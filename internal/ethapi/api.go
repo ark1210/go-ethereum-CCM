@@ -50,6 +50,17 @@ import (
 	"github.com/tyler-smith/go-bip39"
 )
 
+func ensureEvenLengthHex(hexStr string) string {
+	// '0x' 접두사를 제거합니다.
+	cleanHexStr := strings.TrimPrefix(hexStr, "0x")
+	if len(cleanHexStr)%2 != 0 {
+		// 길이가 홀수인 경우 앞에 '0'을 추가합니다.
+		cleanHexStr = "0" + cleanHexStr
+	}
+	// '0x' 접두사를 다시 추가하여 반환합니다.
+	return "0x" + cleanHexStr
+}
+
 // KafkaProducer는 Kafka로 메시지를 전송하는 함수입니다.
 func KafkaProducer(topic string, message []byte) error {
 	producer, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "3.38.154.85:39092"})
