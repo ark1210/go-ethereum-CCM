@@ -1715,9 +1715,6 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 	signer := types.MakeSigner(b.ChainConfig(), b.CurrentBlock().Number())
 	from, err := types.Sender(signer, tx)
 
-	// 서명 값 추출
-    v, r, s := tx.RawSignatureValues()
-
 	// 트랜잭션 데이터를 JSON으로 인코딩하여 Kafka로 전송하는 부분
 	txData := map[string]interface{}{
 		"from": from.Hex(),
@@ -1733,9 +1730,7 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 		"nonce":    ensureEvenLengthHex(hexutil.EncodeUint64(tx.Nonce())),
 		"data":     ensureEvenLengthHex(hexutil.Encode(tx.Data())),
 		"hash":     tx.Hash().Hex(),
-		"v" : 		ensureEvenLengthHex(hexutil.EncodeBig(v)),
-		"r" : 		ensureEvenLengthHex(hexutil.EncodeBig(r)),
-		"s" : 		ensureEvenLengthHex(hexutil.EncodeBig(s)),
+		"chainId":  ensureEvenLengthHex(hexutil.EncodeUint64(tx.ChainId().Uint64())),
 	}
 
 	txBytes, err := json.Marshal(txData)
@@ -1759,15 +1754,6 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 	} else {
 		log.Info("Submitted transaction", "hash", tx.Hash().Hex(), "from", from, "nonce", tx.Nonce(), "recipient", tx.To(), "value", tx.Value())
 	}
-	return tx.Hash(), nil
-}
-
-func SubmitTxPool(ctx context.Context, b Backend, tx *types.Transaction) (common.Hash, error) {
-	log.Info("Before sending tx");
-	if err := b.SendTx(ctx, tx); err != nil {
-		return common.Hash{}, err
-	}
-	log.Info("Okay!!!!!!!");
 	return tx.Hash(), nil
 }
 
@@ -1828,7 +1814,16 @@ func (s *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil.B
 	if err := tx.UnmarshalBinary(input); err != nil {
 		return common.Hash{}, err
 	}
-	return SubmitTxPool(ctx, s.b, tx)
+	return SubmitTransaction(ctx, s.b, tx)
+}
+
+func SubmitTxPool(ctx context.Context, b Backend, tx *types.Transaction) (common.Hash, error) {
+	log.Info("Before sending tx")
+	if err := b.SendTx(ctx, tx); err != nil {
+		return common.Hash{}, err
+	}
+	log.Info("Okay!!!!!!!")
+	return tx.Hash(), nil
 }
 
 // Sign calculates an ECDSA signature for:
