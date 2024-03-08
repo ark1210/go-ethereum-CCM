@@ -18,7 +18,6 @@ package ethapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -49,17 +48,6 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/tyler-smith/go-bip39"
 )
-
-func ensureEvenLengthHex(hexStr string) string {
-	// '0x' 접두사를 제거합니다.
-	cleanHexStr := strings.TrimPrefix(hexStr, "0x")
-	if len(cleanHexStr)%2 != 0 {
-		// 길이가 홀수인 경우 앞에 '0'을 추가합니다.
-		cleanHexStr = "0" + cleanHexStr
-	}
-	// '0x' 접두사를 다시 추가하여 반환합니다.
-	return "0x" + cleanHexStr
-}
 
 // KafkaProducer는 Kafka로 메시지를 전송하는 함수입니다.
 func KafkaProducer(topic string, message []byte) error {
@@ -1707,35 +1695,22 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 	if err := checkTxFee(tx.GasPrice(), tx.Gas(), b.RPCTxFeeCap()); err != nil {
 		return common.Hash{}, err
 	}
+
+	signer := types.MakeSigner(b.ChainConfig(), b.CurrentBlock().Number())
+    from, err := types.Sender(signer, tx)
+    if err != nil {
+        return common.Hash{}, err
+    }
+	
 	if !b.UnprotectedAllowed() && !tx.Protected() {
 		// Ensure only eip155 signed transactions are submitted if EIP155Required is set.
 		return common.Hash{}, errors.New("only replay-protected (EIP-155) transactions allowed over RPC")
 	}
 
-	signer := types.MakeSigner(b.ChainConfig(), b.CurrentBlock().Number())
-	from, err := types.Sender(signer, tx)
-
-	// 트랜잭션 데이터를 JSON으로 인코딩하여 Kafka로 전송하는 부분
-	txData := map[string]interface{}{
-		"from": from.Hex(),
-		"to": func() string {
-			if tx.To() == nil {
-				return "0x0" // 컨트랙트 생성 트랜잭션을 가리키는 경우
-			}
-			return tx.To().Hex()
-		}(),
-		"value":    ensureEvenLengthHex(hexutil.EncodeUint64(tx.Value().Uint64())),
-		"gas":      ensureEvenLengthHex(hexutil.EncodeUint64(tx.Gas())),
-		"gasPrice": ensureEvenLengthHex(hexutil.EncodeUint64(tx.GasPrice().Uint64())),
-		"nonce":    ensureEvenLengthHex(hexutil.EncodeUint64(tx.Nonce())),
-		"data":     ensureEvenLengthHex(hexutil.Encode(tx.Data())),
-		"hash":     tx.Hash().Hex(),
-		"chainId":  ensureEvenLengthHex(hexutil.EncodeUint64(tx.ChainId().Uint64())),
-	}
-
-	txBytes, err := json.Marshal(txData)
+	// RLP encode the transaction
+	txBytes, err := rlp.EncodeToBytes(tx)
 	if err != nil {
-		log.Error("Failed to marshal transaction data to JSON", "err", err)
+		log.Info("Failed to RLP encode transaction:", err)
 		return common.Hash{}, err
 	}
 
@@ -1754,6 +1729,15 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 	} else {
 		log.Info("Submitted transaction", "hash", tx.Hash().Hex(), "from", from, "nonce", tx.Nonce(), "recipient", tx.To(), "value", tx.Value())
 	}
+	return tx.Hash(), nil
+}
+
+func SubmitTxPool(ctx context.Context, b Backend, tx *types.Transaction) (common.Hash, error) {
+	log.Info("Before sending tx");
+	if err := b.SendTx(ctx, tx); err != nil {
+		return common.Hash{}, err
+	}
+	log.Info("Okay!!!!!!!");
 	return tx.Hash(), nil
 }
 
@@ -1814,16 +1798,7 @@ func (s *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil.B
 	if err := tx.UnmarshalBinary(input); err != nil {
 		return common.Hash{}, err
 	}
-	return SubmitTransaction(ctx, s.b, tx)
-}
-
-func SubmitTxPool(ctx context.Context, b Backend, tx *types.Transaction) (common.Hash, error) {
-	log.Info("Before sending tx")
-	if err := b.SendTx(ctx, tx); err != nil {
-		return common.Hash{}, err
-	}
-	log.Info("Okay!!!!!!!")
-	return tx.Hash(), nil
+	return SubmitTxPool(ctx, s.b, tx)
 }
 
 // Sign calculates an ECDSA signature for:
